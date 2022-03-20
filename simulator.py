@@ -3,8 +3,9 @@ import os
 import re
 from random import random
 
-from Bio import SeqIO
 import numpy as np
+from Bio import SeqIO
+from tqdm import tqdm
 
 
 def get_step(reference_length, length_mean, depth):
@@ -15,63 +16,79 @@ def get_step(reference_length, length_mean, depth):
     return step_mean, step_std
 
 
-def introduce_errors(read, subs, indel):
-    i = 0
-    while True:
-        if i >= len(read):
-            break
-
-        if random() < subs:
-            r = random()
-            if r < 0.25:
-                c = 'A'
-            elif r < 0.5:
-                c = 'C'
-            elif r < 0.75:
-                c = 'G'
-            else:
-                c = 'T'
-            read = read[:i] + c + read[i+1:]
-            i += 1
-            continue
-
-        if random() < indel:
-            r = random()
-            if r < indel / 2:
-                read = read[:i] + read[i+1:]
-                continue
-            if r > 1 - indel / 2:
-                read = read[:i] + 2 * read[i] + read[i+1:]  # Only homopolymer insertion, not a random one
+def introduce_errors(subs, indel):
+    def f(read):
+        i = 0
+        condition = subs > 0.0 or indel > 0.0
+        while condition and i < len(read):
+            if random() < subs:
+                r = random()
+                if r < 0.25:
+                    c = 'A'
+                elif r < 0.5:
+                    c = 'C'
+                elif r < 0.75:
+                    c = 'G'
+                else:
+                    c = 'T'
+                read = read[:i] + c + read[i+1:]
                 i += 1
                 continue
-        i += 1
 
-    return read
+            if random() < indel:
+                r = random()
+                if r < indel / 2:
+                    read = read[:i] + read[i+1:]
+                    continue
+                if r > 1 - indel / 2:
+                    read = read[:i] + 2 * read[i] + read[i+1:]  # Only homopolymer insertion, not a random one
+                    i += 1
+                    continue
+            i += 1
+
+        return read
+    return f
+
+class RandomSequenceGenerator:
+    def __init__(self, length_mean, length_std, step_mean, step_std, stop):
+        self.length_mean = length_mean
+        self.length_std = length_std
+        self.step_mean = step_mean
+        self.step_std = step_std
+        self.stop = stop
+
+    def random_sequence(self):
+        start = 0
+        step = 0
+        while start + step  < self.stop:
+            start = start + step
+            length = int(np.random.normal(self.length_mean, self.length_std))
+            step = int(np.random.normal(self.step_mean, self.step_std))
+            end = start + length
+            if end < self.stop:
+                yield (start, end)
+            else:
+                break
+
+    def total(self):
+        return int(self.stop/self.step_mean)
 
 
-def sample_strand(reference, reads_list, length_mean, length_std, step_mean, step_std, subs, indel, strand):
+def sample_strand(reference, reads_list, strand, g, introduce_errors):
     idx = len(reads_list)
-    position = 0
     stop = len(reference)
 
-    while position < stop:
-        length = int(np.random.normal(length_mean, length_std))
-        if position + length < len(reference):
-            read = reference[position:position+length]
-        else:
-            break
-        read.id = str(idx)
-        read.seq = introduce_errors(read.seq, subs, indel)
+    for i, (start, end) in tqdm(enumerate(g.random_sequence()), total=g.total()):
+        read = reference[start:end]
+        read.id = str(idx + i)
+        read.seq = introduce_errors(read.seq)
         if strand == '+':
-            read.description = f'idx={idx}, strand=+, start={position}, end={position+length}'
+            read.description = f'idx={read.id}, strand=+, start={start}, end={end}'
         else:
-            read.description = f'idx={idx}, strand=-, start={len(reference)-position}, end={len(reference)-position-length}'
+            read.description = f'idx={read.id}, strand=-, start={stop-start}, end={stop-end}'
 
         read.letter_annotations = {'phred_quality': [50] * len(read)}
         reads_list.append(read)
-        step = int(np.random.normal(step_mean, step_std))
-        position += step
-        idx += 1
 
     # return reads_list
 
@@ -94,9 +111,12 @@ def main(args):
     step_mean, step_std = get_step(len(reference), length_mean, depth)
     reads_list = []
 
+    g_error = introduce_errors(subs, indel)
     # Sample positive and negative strand
-    sample_strand(reference, reads_list, length_mean, length_std, step_mean, step_std, subs, indel, strand='+')
-    sample_strand(reference_rc, reads_list, length_mean, length_std, step_mean, step_std, subs, indel, strand='-')
+    g_seq = RandomSequenceGenerator(length_mean, length_std, step_mean, step_std, len(reference))
+    sample_strand(reference, reads_list, '+', g_seq, g_error)
+    g_seq = RandomSequenceGenerator(length_mean, length_std, step_mean, step_std, len(reference))
+    sample_strand(reference_rc, reads_list, '-', g_seq, g_error)
     SeqIO.write(reads_list, out_path, 'fastq')
 
 
